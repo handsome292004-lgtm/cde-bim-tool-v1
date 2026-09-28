@@ -7,6 +7,7 @@ let pdfCache = [];
 const PDF_CACHE_KEY_PREFIX = "CDE_TRIMBLE_PDF_CACHE_V1";
 const DEFAULT_CORE_API = "https://app.connect.trimble.com/tc/api/2.0";
 const DEFAULT_BACKEND_PROXY_URL = "";
+const DEFAULT_FOLDER_ID = "";
 
 function $(id) { return document.getElementById(id); }
 
@@ -84,6 +85,7 @@ async function initTrimble() {
   $("coreApiBase").value = localStorage.getItem("CDE_CORE_API_BASE") || DEFAULT_CORE_API;
   if ($("backendProxyUrl")) $("backendProxyUrl").value = localStorage.getItem("CDE_BACKEND_PROXY_URL") || "";
   $("folderFilter").value = localStorage.getItem("CDE_TRIMBLE_PDF_FOLDER_FILTER") || $("folderFilter").value;
+  if ($("folderIdInput")) $("folderIdInput").value = localStorage.getItem("CDE_TRIMBLE_PDF_FOLDER_ID") || DEFAULT_FOLDER_ID;
 
   if (!window.TrimbleConnectWorkspace || window.parent === window) {
     setStatus("Test ngoài Trimble", "warn");
@@ -229,6 +231,7 @@ function extractElementInfoFromProperties(objectProperties) {
 async function scanTrimblePdfs() {
   localStorage.setItem("CDE_CORE_API_BASE", getCoreApiBase());
   localStorage.setItem("CDE_TRIMBLE_PDF_FOLDER_FILTER", $("folderFilter").value.trim());
+  if ($("folderIdInput")) localStorage.setItem("CDE_TRIMBLE_PDF_FOLDER_ID", $("folderIdInput").value.trim());
 
   if (!currentProject?.id) {
     setMessage("sourceMessage", "Chưa có Project ID. Hãy mở tool trong Trimble Project.", "error");
@@ -252,13 +255,22 @@ async function scanTrimblePdfs() {
         project_id: currentProject.id,
         token,
         core_api_base: getCoreApiBase(),
-        folder_filter: $("folderFilter").value.trim()
+        folder_filter: $("folderFilter").value.trim(),
+        folder_id: ($("folderIdInput")?.value || "").trim()
       })
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       const detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail || data);
       throw new Error(`${res.status} ${res.statusText}: ${detail}`);
+    }
+
+    if (data.ok === false) {
+      const firstError = (data.candidate_errors || [])[0];
+      const detail = firstError ? `\nNguồn lỗi: ${firstError.url || ""}\n${firstError.error || ""}` : "";
+      setMessage("sourceMessage", `${data.message || "Không quét được PDF."}${detail}`, "error");
+      console.warn("Trimble scan debug", data);
+      return;
     }
 
     pdfCache = dedupeByNameAndId((data.files || []).map(normalizeTrimbleFile));

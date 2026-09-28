@@ -69,8 +69,12 @@
         <input id="coreApiBase" type="text" value="https://app.connect.trimble.com/tc/api/2.0" />
 
         <label for="folderFilter">Lọc theo thư mục/tên folder chứa PDF</label>
-        <input id="folderFilter" type="text" value="00_Bao Cao Nghiem Thu Khao Sat" placeholder="VD: 00_Bao Cao Nghiem Thu Khao Sat" />
+        <input id="folderFilter" type="text" value="" placeholder="VD: 00_Bao Cao Nghiem Thu Khao Sat" />
         <p class="hint">Có thể để trống để quét toàn bộ project.</p>
+
+        <label for="folderIdInput">Folder ID tùy chọn</label>
+        <input id="folderIdInput" type="text" value="" placeholder="Dán Folder ID nếu có, để trống nếu không biết" />
+        <p class="hint">Chỉ dùng khi API tự tìm folder chưa được. Có thể lấy Folder ID từ URL Explorer khi mở đúng thư mục PDF.</p>
 
         <div class="row wrap">
           <button id="saveBackendProxyBtn" class="secondary" type="button">Lưu Backend</button>
