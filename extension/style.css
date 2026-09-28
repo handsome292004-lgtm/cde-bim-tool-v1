@@ -9,6 +9,7 @@
   --danger: #b42318;
   --ok: #067647;
   --warn: #b54708;
+  --tab-bg: #e8eef5;
   font-family: Arial, Helvetica, sans-serif;
 }
 
@@ -23,27 +24,64 @@ body {
 .app {
   max-width: 720px;
   margin: 0 auto;
-  padding: 14px;
+  padding: 12px;
 }
 
 .header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
+  gap: 10px;
+  margin-bottom: 10px;
 }
 
 .header h1 {
   margin: 0;
-  font-size: 20px;
+  font-size: 19px;
 }
 
 .header p {
   margin: 4px 0 0;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 12px;
 }
+
+.tabs {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  padding: 6px 0 10px;
+  margin-bottom: 2px;
+  background: var(--bg);
+}
+
+.tab-button {
+  border: 1px solid var(--border);
+  background: var(--tab-bg);
+  color: #1f2937;
+  border-radius: 999px;
+  padding: 8px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.tab-button:hover {
+  background: #d9e4f0;
+}
+
+.tab-button.active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: white;
+}
+
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
 
 .card {
   background: var(--card);
@@ -57,6 +95,18 @@ body {
 .card h2 {
   margin: 0 0 12px;
   font-size: 15px;
+}
+
+.card-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.card-title-row h2 {
+  margin: 0;
 }
 
 .card.muted {
@@ -94,6 +144,7 @@ button:hover { background: var(--primary-dark); }
 button.secondary { background: #e5e7eb; color: #111827; }
 button.secondary:hover { background: #d1d5db; }
 button.danger { background: var(--danger); }
+button.small { padding: 7px 10px; font-size: 12px; }
 
 .row {
   display: flex;
@@ -120,7 +171,7 @@ button.danger { background: var(--danger); }
 
 .info-grid {
   display: grid;
-  grid-template-columns: 120px 1fr;
+  grid-template-columns: 110px 1fr;
   gap: 8px;
   margin: 0;
   font-size: 13px;
@@ -168,6 +219,10 @@ button.danger { background: var(--danger); }
   font-size: 13px;
 }
 
+.doc-title span:first-child {
+  overflow-wrap: anywhere;
+}
+
 .doc-meta {
   margin-top: 4px;
   color: var(--muted);
@@ -178,6 +233,7 @@ button.danger { background: var(--danger); }
   margin-top: 8px;
   display: flex;
   gap: 8px;
+  align-items: center;
 }
 
 .doc-actions a {
@@ -185,4 +241,16 @@ button.danger { background: var(--danger); }
   font-weight: 700;
   text-decoration: none;
   font-size: 13px;
+}
+
+@media (max-width: 420px) {
+  .app { padding: 10px; }
+  .header { flex-direction: column; }
+  .row,
+  .row.two {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .row.two > div { width: 100%; }
+  .info-grid { grid-template-columns: 95px 1fr; }
 }

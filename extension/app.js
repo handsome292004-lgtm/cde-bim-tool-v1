@@ -14,6 +14,7 @@ function getBackendUrl() {
 
 function setMessage(id, text, type = "") {
   const el = $(id);
+  if (!el) return;
   el.textContent = text || "";
   el.className = `message ${type}`.trim();
 }
@@ -22,6 +23,21 @@ function setStatus(text, type = "gray") {
   const el = $("apiStatus");
   el.textContent = text;
   el.className = `badge badge-${type}`;
+}
+
+function setActiveTab(tabName) {
+  document.querySelectorAll(".tab-button").forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.tab === tabName);
+  });
+  document.querySelectorAll(".tab-panel").forEach(panel => {
+    panel.classList.toggle("active", panel.id === `tab-${tabName}`);
+  });
+}
+
+function initTabs() {
+  document.querySelectorAll(".tab-button").forEach(btn => {
+    btn.addEventListener("click", () => setActiveTab(btn.dataset.tab));
+  });
 }
 
 function safeText(value) {
@@ -69,7 +85,7 @@ async function initTrimble() {
 
   if (!window.TrimbleConnectWorkspace || window.parent === window) {
     setStatus("Test ngoài Trimble", "warn");
-    setMessage("selectionMessage", "Đang mở ngoài Trimble. Dùng phần 'Chế độ test ngoài Trimble' để test backend.", "warn");
+    setMessage("selectionMessage", "Đang mở ngoài Trimble. Dùng tab 'Test' để test backend.", "warn");
     return;
   }
 
@@ -107,6 +123,7 @@ async function handleSelectionChanged(arg) {
     currentSelection = null;
     updateSelectionUi(null);
     renderDocuments([]);
+    setActiveTab("object");
     setMessage("selectionMessage", "Chưa chọn cấu kiện hoặc selection rỗng.", "warn");
     return;
   }
@@ -157,6 +174,7 @@ async function handleSelectionChanged(arg) {
   updateSelectionUi(currentSelection);
   setMessage("selectionMessage", "Đã chọn cấu kiện. Đang tải danh sách PDF...", "ok");
   await loadDocuments();
+  setActiveTab("documents");
 }
 
 function extractElementInfoFromProperties(objectProperties) {
@@ -287,6 +305,7 @@ async function attachDocument() {
 
   if (!currentSelection?.ifcGuid || !currentSelection?.modelId) {
     setMessage("attachMessage", "Bạn cần chọn cấu kiện trước khi gắn PDF.", "error");
+    setActiveTab("object");
     return;
   }
 
@@ -322,6 +341,7 @@ async function attachDocument() {
     $("revision").value = "";
     setMessage("attachMessage", "Đã gắn link PDF vào cấu kiện.", "ok");
     await loadDocuments();
+    setActiveTab("documents");
   } catch (err) {
     setMessage("attachMessage", `Lỗi khi gắn PDF: ${err.message || err}`, "error");
   }
@@ -352,6 +372,7 @@ function useManualSelection() {
   };
   updateSelectionUi(currentSelection);
   loadDocuments();
+  setActiveTab("documents");
 }
 
 function escapeHtml(value) {
@@ -370,6 +391,7 @@ function escapeAttribute(value) {
 window.deleteDocument = deleteDocument;
 
 window.addEventListener("DOMContentLoaded", () => {
+  initTabs();
   $("backendUrl").value = getBackendUrl();
   $("saveBackendBtn").addEventListener("click", () => {
     localStorage.setItem("CDE_BACKEND_URL", $("backendUrl").value.trim() || DEFAULT_BACKEND_URL);
@@ -378,5 +400,6 @@ window.addEventListener("DOMContentLoaded", () => {
   $("testBackendBtn").addEventListener("click", testBackend);
   $("attachBtn").addEventListener("click", attachDocument);
   $("manualSelectBtn").addEventListener("click", useManualSelection);
+  $("refreshDocsBtn").addEventListener("click", loadDocuments);
   initTrimble();
 });
