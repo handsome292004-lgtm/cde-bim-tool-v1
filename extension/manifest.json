@@ -1,7 +1,7 @@
 {
-  "url": "https://nguyenvanan.github.io/cde-bim-tool-v1/extension/index.html",
+  "url": "https://handsome292004-lgtm.github.io/cde-bim-tool-v1/extension/index.html",
   "title": "CDE BIM PDF Linker",
-  "icon": "https://cde-bim-tool-v1.github.io/cde-bim-tool-v1/extension/icon.svg",
+  "icon": "https://handsome292004-lgtm.github.io/cde-bim-tool-v1/extension/icon.svg",
   "description": "Link PDF documents to selected IFC/BIM objects in Trimble Connect 3D Viewer.",
   "extensionType": ["3dviewer"]
 }
