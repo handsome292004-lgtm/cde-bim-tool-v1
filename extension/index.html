@@ -12,17 +12,16 @@
     <header class="header">
       <div>
         <h1>CDE BIM PDF Linker</h1>
-        <p>Gắn hồ sơ PDF vào cấu kiện BIM trong Trimble Connect</p>
+        <p>Nguồn PDF: Trimble Connect Project</p>
       </div>
       <span id="apiStatus" class="badge badge-gray">Chưa kết nối</span>
     </header>
 
-    <nav class="tabs" aria-label="CDE BIM PDF Linker Tabs">
-      <button class="tab-button active" type="button" data-tab="object">Cấu kiện</button>
-      <button class="tab-button" type="button" data-tab="documents">Hồ sơ PDF</button>
-      <button class="tab-button" type="button" data-tab="attach">Gắn PDF</button>
-      <button class="tab-button" type="button" data-tab="settings">Cấu hình</button>
-      <button class="tab-button" type="button" data-tab="test">Test</button>
+    <nav class="tabs" aria-label="Tool tabs">
+      <button class="tab-button active" data-tab="object" type="button">Cấu kiện</button>
+      <button class="tab-button" data-tab="docs" type="button">Hồ sơ PDF</button>
+      <button class="tab-button" data-tab="source" type="button">Nguồn PDF</button>
+      <button class="tab-button" data-tab="test" type="button">Test</button>
     </nav>
 
     <section id="tab-object" class="tab-panel active">
@@ -46,73 +45,55 @@
       </section>
     </section>
 
-    <section id="tab-documents" class="tab-panel">
+    <section id="tab-docs" class="tab-panel">
       <section class="card">
-        <div class="card-title-row">
-          <h2>Hồ sơ PDF đã gắn</h2>
-          <button id="refreshDocsBtn" type="button" class="secondary small">Tải lại</button>
+        <div class="section-header">
+          <h2>Hồ sơ PDF khớp Mã hiệu</h2>
+          <button id="refreshMatchBtn" class="secondary" type="button">Tải lại</button>
         </div>
         <div id="documentsList" class="documents empty">Chưa có cấu kiện được chọn.</div>
+        <p id="documentsMessage" class="message"></p>
       </section>
     </section>
 
-    <section id="tab-attach" class="tab-panel">
+    <section id="tab-source" class="tab-panel">
       <section class="card">
-        <h2>Gắn link PDF mới</h2>
-        <label for="fileName">Tên file</label>
-        <input id="fileName" type="text" placeholder="BBNT_N5_BV_L1_B01_Thep_R01.pdf" />
+        <h2>Nguồn PDF từ Trimble Project</h2>
+        <p class="hint">Tool sẽ quét các file PDF trong project Trimble, sau đó tự match theo Mã hiệu trong tên file.</p>
 
-        <label for="fileUrl">URL PDF</label>
-        <input id="fileUrl" type="url" placeholder="https://.../file.pdf" />
+        <label for="coreApiBase">Trimble Core API Base</label>
+        <input id="coreApiBase" type="text" value="https://app.connect.trimble.com/tc/api/2.0" />
 
-        <div class="row two">
-          <div>
-            <label for="documentType">Loại hồ sơ</label>
-            <input id="documentType" type="text" placeholder="BBNT / BVHC / CL" />
-          </div>
-          <div>
-            <label for="revision">Revision</label>
-            <input id="revision" type="text" placeholder="R01" />
-          </div>
+        <label for="folderFilter">Lọc theo thư mục/tên folder chứa PDF</label>
+        <input id="folderFilter" type="text" value="00_Bao Cao Nghiem Thu Khao Sat" placeholder="VD: 00_Bao Cao Nghiem Thu Khao Sat" />
+        <p class="hint">Có thể để trống để quét toàn bộ project.</p>
+
+        <div class="row wrap">
+          <button id="requestTokenBtn" type="button">Xin quyền Access Token</button>
+          <button id="scanTrimblePdfBtn" type="button">Quét PDF trong Trimble</button>
+          <button id="clearPdfCacheBtn" class="secondary" type="button">Xóa cache PDF</button>
         </div>
 
-        <button id="attachBtn" type="button">Gắn Link vào Cấu kiện</button>
-        <p id="attachMessage" class="message"></p>
-      </section>
-    </section>
-
-    <section id="tab-settings" class="tab-panel">
-      <section class="card">
-        <h2>Cấu hình Backend</h2>
-        <label for="backendUrl">Backend URL</label>
-        <div class="row">
-          <input id="backendUrl" type="text" value="http://localhost:8000" />
-          <button id="saveBackendBtn" type="button">Lưu</button>
-        </div>
-        <button id="testBackendBtn" type="button" class="secondary">Test /health</button>
-        <p id="backendMessage" class="message"></p>
+        <dl class="info-grid compact">
+          <dt>Token</dt>
+          <dd id="tokenStatus">-</dd>
+          <dt>Số PDF đã quét</dt>
+          <dd id="pdfCount">0</dd>
+          <dt>Lần quét</dt>
+          <dd id="lastScanInfo">-</dd>
+        </dl>
+        <p id="sourceMessage" class="message"></p>
       </section>
     </section>
 
     <section id="tab-test" class="tab-panel">
       <section class="card muted">
-        <h2>Chế độ test ngoài Trimble</h2>
-        <p>Khi mở file này ngoài Trimble, bạn có thể nhập tay dữ liệu để test backend.</p>
-        <div class="row two">
-          <div>
-            <label for="manualProjectId">Project ID</label>
-            <input id="manualProjectId" type="text" placeholder="demo_project" />
-          </div>
-          <div>
-            <label for="manualModelId">Model ID</label>
-            <input id="manualModelId" type="text" placeholder="demo_model" />
-          </div>
-        </div>
-        <label for="manualIfcGuid">IFC GlobalId</label>
-        <input id="manualIfcGuid" type="text" placeholder="demo_ifc_guid" />
+        <h2>Test ngoài Trimble</h2>
+        <p>Khi mở ngoài Trimble, bạn có thể nhập tay Mã hiệu để kiểm tra cache PDF đã quét.</p>
         <label for="manualElementCode">Mã hiệu</label>
-        <input id="manualElementCode" type="text" placeholder="N5_BV_L1_B01" />
-        <button id="manualSelectBtn" type="button" class="secondary">Dùng dữ liệu test</button>
+        <input id="manualElementCode" type="text" placeholder="N5_GT_KCAD_L1_A01" />
+        <button id="manualSelectBtn" type="button" class="secondary">Dùng mã hiệu test</button>
+        <p id="testMessage" class="message"></p>
       </section>
     </section>
   </main>
