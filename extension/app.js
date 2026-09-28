@@ -6,6 +6,7 @@ let pdfCache = [];
 
 const PDF_CACHE_KEY_PREFIX = "CDE_TRIMBLE_PDF_CACHE_V1";
 const DEFAULT_CORE_API = "https://app.connect.trimble.com/tc/api/2.0";
+const DEFAULT_BACKEND_PROXY_URL = "";
 
 function $(id) { return document.getElementById(id); }
 
@@ -23,6 +24,7 @@ function setStatus(text, type = "gray") {
 function safeText(value) { return value === null || value === undefined || value === "" ? "-" : String(value); }
 function sanitizeCode(value) { return String(value || "").trim(); }
 function getCoreApiBase() { return ($("coreApiBase").value.trim() || DEFAULT_CORE_API).replace(/\/$/, ""); }
+function getBackendProxyUrl() { return (($("backendProxyUrl")?.value || localStorage.getItem("CDE_BACKEND_PROXY_URL") || DEFAULT_BACKEND_PROXY_URL).trim()).replace(/\/$/, ""); }
 function cacheKey() { return `${PDF_CACHE_KEY_PREFIX}:${currentProject?.id || "no_project"}`; }
 
 function setActiveTab(tabName) {
@@ -80,6 +82,7 @@ function getRuntimeIds(modelSelection) {
 
 async function initTrimble() {
   $("coreApiBase").value = localStorage.getItem("CDE_CORE_API_BASE") || DEFAULT_CORE_API;
+  if ($("backendProxyUrl")) $("backendProxyUrl").value = localStorage.getItem("CDE_BACKEND_PROXY_URL") || "";
   $("folderFilter").value = localStorage.getItem("CDE_TRIMBLE_PDF_FOLDER_FILTER") || $("folderFilter").value;
 
   if (!window.TrimbleConnectWorkspace || window.parent === window) {
@@ -234,27 +237,39 @@ async function scanTrimblePdfs() {
   const token = await requestAccessToken();
   if (!token) return;
 
-  setMessage("sourceMessage", "Đang quét file PDF trong Trimble Project...", "warn");
-  try {
-    const files = await fetchTrimbleProjectFiles(currentProject.id, token);
-    const folderFilter = normalizeForMatch($("folderFilter").value.trim());
-    const pdfs = files
-      .filter(f => String(f.name || "").toLowerCase().endsWith(".pdf"))
-      .filter(f => {
-        if (!folderFilter) return true;
-        const path = normalizeForMatch([f.path, f.folderPath, f.location, f.folderName].filter(Boolean).join(" / "));
-        return path.includes(folderFilter) || normalizeForMatch(f.name).includes(folderFilter);
-      })
-      .map(normalizeTrimbleFile);
+  const backendUrl = getBackendProxyUrl();
+  if (!backendUrl) {
+    setMessage("sourceMessage", "Bạn cần nhập Backend Proxy URL trước, ví dụ https://...trycloudflare.com", "error");
+    return;
+  }
 
-    pdfCache = dedupeByNameAndId(pdfs);
+  setMessage("sourceMessage", "Đang quét file PDF trong Trimble Project qua backend proxy...", "warn");
+  try {
+    const res = await fetch(`${backendUrl}/api/trimble/scan-pdfs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        project_id: currentProject.id,
+        token,
+        core_api_base: getCoreApiBase(),
+        folder_filter: $("folderFilter").value.trim()
+      })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail || data);
+      throw new Error(`${res.status} ${res.statusText}: ${detail}`);
+    }
+
+    pdfCache = dedupeByNameAndId((data.files || []).map(normalizeTrimbleFile));
     savePdfCache();
     $("lastScanInfo").textContent = new Date().toLocaleString();
-    setMessage("sourceMessage", `Đã quét ${pdfCache.length} file PDF từ Trimble Project.`, pdfCache.length ? "ok" : "warn");
+    const apiNote = data.source_url ? ` Nguồn: ${data.source_url}` : "";
+    setMessage("sourceMessage", `Đã quét ${pdfCache.length} file PDF từ Trimble Project.${apiNote}`, pdfCache.length ? "ok" : "warn");
     renderDocumentsForSelection();
   } catch (err) {
     console.error(err);
-    setMessage("sourceMessage", `Lỗi khi quét Trimble PDF: ${err.message || err}`, "error");
+    setMessage("sourceMessage", `Lỗi khi quét Trimble PDF qua backend: ${err.message || err}`, "error");
   }
 }
 
@@ -440,12 +455,36 @@ function clearPdfCache() {
 function escapeHtml(value) {
   return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
 }
+async function testBackendProxy() {
+  const backendUrl = getBackendProxyUrl();
+  if (!backendUrl) {
+    setMessage("sourceMessage", "Chưa nhập Backend Proxy URL.", "error");
+    return;
+  }
+  try {
+    const res = await fetch(`${backendUrl}/health`);
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    const data = await res.json();
+    setMessage("sourceMessage", `Backend OK: ${JSON.stringify(data)}`, "ok");
+  } catch (err) {
+    setMessage("sourceMessage", `Không kết nối được backend proxy: ${err.message || err}`, "error");
+  }
+}
+
+function saveBackendProxy() {
+  const url = getBackendProxyUrl();
+  localStorage.setItem("CDE_BACKEND_PROXY_URL", url);
+  setMessage("sourceMessage", `Đã lưu Backend Proxy URL: ${url || "(trống)"}`, "ok");
+}
+
 window.openTrimblePdf = openTrimblePdf;
 window.copyFileName = copyFileName;
 
 window.addEventListener("DOMContentLoaded", () => {
   initTabs();
   $("requestTokenBtn").addEventListener("click", requestAccessToken);
+  if ($("saveBackendProxyBtn")) $("saveBackendProxyBtn").addEventListener("click", saveBackendProxy);
+  if ($("testBackendProxyBtn")) $("testBackendProxyBtn").addEventListener("click", testBackendProxy);
   $("scanTrimblePdfBtn").addEventListener("click", scanTrimblePdfs);
   $("clearPdfCacheBtn").addEventListener("click", clearPdfCache);
   $("refreshMatchBtn").addEventListener("click", renderDocumentsForSelection);

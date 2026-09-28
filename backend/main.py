@@ -1,19 +1,21 @@
-from pathlib import Path
+from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException, Query
+import json
+import urllib.error
+import urllib.parse
+import urllib.request
+from typing import Any
+
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-
-from database import add_document, delete_document, init_db, list_documents, upsert_element, list_elements
-from schemas import AutoMapRequest, DocumentCreate, ElementCreate, ImportIfcRequest
+from pydantic import BaseModel, Field
 
 app = FastAPI(
     title="CDE BIM PDF Linker API",
-    description="FastAPI backend for linking PDF documents to IFC objects selected in Trimble Connect.",
-    version="1.0.0",
+    description="Backend proxy for CDE BIM PDF Linker. It helps the Trimble extension scan project PDFs without browser CORS issues.",
+    version="1.2.0-trimble-pdf-proxy",
 )
 
-# During development, keep CORS open so GitHub Pages / local HTML can call the API.
-# For production, replace allow_origins=["*"] with your real extension domain.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -23,120 +25,192 @@ app.add_middleware(
 )
 
 
-@app.on_event("startup")
-def on_startup() -> None:
-    init_db()
+class TrimbleScanRequest(BaseModel):
+    project_id: str = Field(..., min_length=1)
+    token: str = Field(..., min_length=10)
+    core_api_base: str = "https://app.connect.trimble.com/tc/api/2.0"
+    folder_filter: str | None = None
 
 
 @app.get("/health")
-def health() -> dict:
+def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/api/docs")
-def get_docs(
-    project_id: str = Query(..., min_length=1),
-    model_id: str = Query(..., min_length=1),
-    ifc_guid: str = Query(..., min_length=1),
-) -> dict:
-    """Return all documents attached to a selected IFC object."""
-    return list_documents(project_id=project_id, model_id=model_id, ifc_guid=ifc_guid)
+def _normalize_base(url: str) -> str:
+    return (url or "").strip().rstrip("/")
 
 
-@app.post("/api/docs", status_code=201)
-def create_doc(payload: DocumentCreate) -> dict:
-    """Attach one PDF/document URL to one BIM element."""
-    created = add_document(
-        project_id=payload.project_id,
-        model_id=payload.model_id,
-        ifc_guid=payload.ifc_guid,
-        element_code=payload.element_code,
-        element_name=payload.element_name,
-        file_name=payload.file_name,
-        file_url=payload.file_url,
-        document_type=payload.document_type,
-        revision=payload.revision,
+def _http_get_json(url: str, token: str) -> Any:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json, */*",
+            "User-Agent": "CDE-BIM-PDF-Linker/1.2",
+        },
+        method="GET",
     )
-    return {"message": "document_created", "document": created}
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+            if not raw:
+                return None
+            return json.loads(raw)
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")[:1000]
+        raise RuntimeError(f"HTTP {exc.code} {exc.reason}: {body}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Network error: {exc.reason}") from exc
 
 
-@app.delete("/api/docs/{document_id}")
-def remove_doc(document_id: int) -> dict:
-    ok = delete_document(document_id)
-    if not ok:
-        raise HTTPException(status_code=404, detail="Document not found")
-    return {"message": "document_deleted", "id": document_id}
+def _collect_file_like_objects(data: Any) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    seen: set[int] = set()
+
+    def walk(node: Any, inherited_path: str = "") -> None:
+        if node is None:
+            return
+        if isinstance(node, list):
+            for item in node:
+                walk(item, inherited_path)
+            return
+        if not isinstance(node, dict):
+            return
+
+        node_id = id(node)
+        if node_id in seen:
+            return
+        seen.add(node_id)
+
+        name = node.get("name") or node.get("fileName") or node.get("title") or node.get("displayName")
+        kind = str(node.get("type") or node.get("objectType") or node.get("itemType") or "").lower()
+        path = node.get("path") or node.get("folderPath") or node.get("location") or inherited_path
+
+        if name and ("file" in kind or "." in str(name)):
+            copied = dict(node)
+            copied["name"] = name
+            copied["path"] = path
+            output.append(copied)
+
+        is_folder = bool(name) and ("folder" in kind or "children" in node or "items" in node)
+        next_path = "/".join([x for x in [inherited_path, str(name) if is_folder else ""] if x])
+        for value in node.values():
+            walk(value, next_path or inherited_path)
+
+    walk(data)
+    return output
 
 
-@app.post("/api/elements", status_code=201)
-def create_or_update_element(payload: ElementCreate) -> dict:
-    element = upsert_element(
-        project_id=payload.project_id,
-        model_id=payload.model_id,
-        ifc_guid=payload.ifc_guid,
-        element_code=payload.element_code,
-        element_name=payload.element_name,
+def _norm(text: Any) -> str:
+    import unicodedata
+    text = unicodedata.normalize("NFD", str(text or "").lower())
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
+    return "".join(ch if ch.isalnum() or ch in "_-./ " else "" for ch in text)
+
+
+def _normalize_file(file_obj: dict[str, Any]) -> dict[str, Any]:
+    links = file_obj.get("links") if isinstance(file_obj.get("links"), dict) else {}
+    links2 = file_obj.get("_links") if isinstance(file_obj.get("_links"), dict) else {}
+
+    def href(container: dict[str, Any], key: str) -> str | None:
+        value = container.get(key)
+        if isinstance(value, dict):
+            return value.get("href")
+        if isinstance(value, str):
+            return value
+        return None
+
+    file_id = (
+        file_obj.get("id")
+        or file_obj.get("fileId")
+        or file_obj.get("identifier")
+        or file_obj.get("fileIdentifier")
+        or file_obj.get("file_id")
+        or file_obj.get("objectId")
+        or file_obj.get("versionId")
+        or file_obj.get("version_id")
     )
-    return {"message": "element_saved", "element": element}
+    name = file_obj.get("name") or file_obj.get("fileName") or file_obj.get("title") or file_obj.get("displayName")
+    path = file_obj.get("path") or file_obj.get("folderPath") or file_obj.get("location") or file_obj.get("parentPath") or ""
+    direct_url = (
+        file_obj.get("downloadUrl")
+        or file_obj.get("url")
+        or file_obj.get("webUrl")
+        or file_obj.get("viewerUrl")
+        or href(links, "download")
+        or href(links2, "download")
+        or href(links, "self")
+        or href(links2, "self")
+        or ""
+    )
+    return {"id": file_id, "name": name, "path": path, "directUrl": direct_url, "raw": file_obj}
 
 
-@app.get("/api/elements")
-def get_elements(project_id: str | None = None, model_id: str | None = None) -> dict:
-    return {"items": list_elements(project_id=project_id, model_id=model_id)}
+def _candidate_urls(base: str, project_id: str) -> list[str]:
+    p = urllib.parse.quote(project_id, safe="")
+    return [
+        f"{base}/projects/{p}/files?fullyLoaded=true&pageSize=1000",
+        f"{base}/projects/{p}/files?includeFolders=true&pageSize=1000",
+        f"{base}/projects/{p}/files?pageSize=1000",
+        f"{base}/projects/{p}/files",
+        f"{base}/projects/{p}/documents?fullyLoaded=true&pageSize=1000",
+        f"{base}/projects/{p}/documents?pageSize=1000",
+        f"{base}/projects/{p}/documents",
+        f"{base}/projects/{p}/folders?includeFiles=true&pageSize=1000",
+    ]
 
 
-@app.post("/api/import-ifc")
-def import_ifc(payload: ImportIfcRequest) -> dict:
-    """
-    Optional V1+ endpoint: read IFC by IfcOpenShell and save elements into SQLite.
-    This endpoint expects the IFC path to exist on the backend machine.
-    """
-    from ifc_reader import extract_elements_from_ifc
+@app.post("/api/trimble/scan-pdfs")
+def scan_trimble_pdfs(payload: TrimbleScanRequest) -> dict[str, Any]:
+    base = _normalize_base(payload.core_api_base)
+    if not base.startswith("https://"):
+        raise HTTPException(status_code=400, detail="core_api_base phải bắt đầu bằng https://")
 
-    path = Path(payload.ifc_path)
-    if not path.exists():
-        raise HTTPException(status_code=400, detail=f"IFC file not found: {payload.ifc_path}")
+    folder_filter = _norm(payload.folder_filter)
+    errors: list[dict[str, str]] = []
 
-    try:
-        items = extract_elements_from_ifc(
-            str(path),
-            pset_name=payload.pset_name,
-            code_property=payload.code_property,
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    for url in _candidate_urls(base, payload.project_id):
+        try:
+            data = _http_get_json(url, payload.token)
+            items = _collect_file_like_objects(data)
+            files = []
+            for item in items:
+                normalized = _normalize_file(item)
+                name = str(normalized.get("name") or "")
+                if not name.lower().endswith(".pdf"):
+                    continue
+                if folder_filter:
+                    searchable = _norm(" / ".join([str(normalized.get("path") or ""), name]))
+                    if folder_filter not in searchable:
+                        continue
+                files.append(normalized)
 
-    saved = []
-    for item in items:
-        saved.append(
-            upsert_element(
-                project_id=payload.project_id,
-                model_id=payload.model_id,
-                ifc_guid=item["ifc_guid"],
-                element_code=item.get("element_code"),
-                element_name=item.get("element_name"),
-            )
-        )
+            if files:
+                # de-duplicate by id/name/path
+                dedup: dict[str, dict[str, Any]] = {}
+                for f in files:
+                    key = f"{f.get('id') or 'noid'}::{f.get('name')}::{f.get('path')}"
+                    dedup[key] = f
+                return {
+                    "project_id": payload.project_id,
+                    "count": len(dedup),
+                    "files": sorted(dedup.values(), key=lambda x: str(x.get("name") or "")),
+                    "source_url": url,
+                    "errors_before_success": errors,
+                }
 
-    return {"message": "ifc_imported", "count": len(saved), "items": saved}
+            errors.append({"url": url, "error": f"API đọc được nhưng không tìm thấy PDF. Items={len(items)}"})
+        except Exception as exc:  # noqa: BLE001
+            errors.append({"url": url, "error": str(exc)})
 
-
-@app.post("/api/auto-map")
-def auto_map(payload: AutoMapRequest) -> dict:
-    """
-    Optional V1+ endpoint: match PDFs by full element_code in filename.
-    Use only after /api/import-ifc has already saved elements.
-    """
-    from pdf_mapper import auto_map_pdfs
-
-    try:
-        return auto_map_pdfs(
-            project_id=payload.project_id,
-            model_id=payload.model_id,
-            pdf_folder=payload.pdf_folder,
-            document_type=payload.document_type,
-            revision=payload.revision,
-            base_url=payload.base_url,
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    raise HTTPException(
+        status_code=502,
+        detail={
+            "message": "Không quét được PDF từ Trimble Core API. Có thể sai API base/region, token thiếu quyền file, hoặc endpoint file của project khác mẫu hiện tại.",
+            "project_id": payload.project_id,
+            "core_api_base": base,
+            "folder_filter": payload.folder_filter,
+            "candidate_errors": errors,
+        },
+    )

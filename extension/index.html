@@ -61,6 +61,10 @@
         <h2>Nguồn PDF từ Trimble Project</h2>
         <p class="hint">Tool sẽ quét các file PDF trong project Trimble, sau đó tự match theo Mã hiệu trong tên file.</p>
 
+        <label for="backendProxyUrl">Backend Proxy URL</label>
+        <input id="backendProxyUrl" type="text" placeholder="https://...trycloudflare.com" />
+        <p class="hint">Dùng Cloudflare URL đang chạy backend local. Extension sẽ gọi backend này để quét file Trimble, tránh lỗi CORS.</p>
+
         <label for="coreApiBase">Trimble Core API Base</label>
         <input id="coreApiBase" type="text" value="https://app.connect.trimble.com/tc/api/2.0" />
 
@@ -69,6 +73,8 @@
         <p class="hint">Có thể để trống để quét toàn bộ project.</p>
 
         <div class="row wrap">
+          <button id="saveBackendProxyBtn" class="secondary" type="button">Lưu Backend</button>
+          <button id="testBackendProxyBtn" class="secondary" type="button">Test Backend</button>
           <button id="requestTokenBtn" type="button">Xin quyền Access Token</button>
           <button id="scanTrimblePdfBtn" type="button">Quét PDF trong Trimble</button>
           <button id="clearPdfCacheBtn" class="secondary" type="button">Xóa cache PDF</button>
