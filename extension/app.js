@@ -40,6 +40,14 @@ function initTabs() {
   });
 }
 
+
+function cdeFetch(url, options = {}) {
+  const headers = new Headers(options.headers || {});
+  // Required for ngrok free tunnels so fetch() does not receive the ngrok browser warning page.
+  headers.set("ngrok-skip-browser-warning", "true");
+  return fetch(url, { ...options, headers });
+}
+
 function safeText(value) {
   return value === null || value === undefined || value === "" ? "-" : String(value);
 }
@@ -224,7 +232,7 @@ function extractElementInfoFromProperties(objectProperties) {
 async function testBackend() {
   const url = `${getBackendUrl()}/health`;
   try {
-    const res = await fetch(url);
+    const res = await cdeFetch(url);
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     const data = await res.json();
     setMessage("backendMessage", `Backend OK: ${JSON.stringify(data)}`, "ok");
@@ -246,7 +254,7 @@ async function loadDocuments() {
   });
 
   try {
-    const res = await fetch(`${getBackendUrl()}/api/docs?${params.toString()}`);
+    const res = await cdeFetch(`${getBackendUrl()}/api/docs?${params.toString()}`);
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     const data = await res.json();
 
@@ -328,7 +336,7 @@ async function attachDocument() {
   };
 
   try {
-    const res = await fetch(`${getBackendUrl()}/api/docs`, {
+    const res = await cdeFetch(`${getBackendUrl()}/api/docs`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -349,7 +357,7 @@ async function attachDocument() {
 
 async function deleteDocument(id) {
   try {
-    const res = await fetch(`${getBackendUrl()}/api/docs/${id}`, { method: "DELETE" });
+    const res = await cdeFetch(`${getBackendUrl()}/api/docs/${id}`, { method: "DELETE" });
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     await loadDocuments();
   } catch (err) {
