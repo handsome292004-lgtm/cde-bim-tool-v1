@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CDE BIM PDF Linker</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://components.connect.trimble.com/trimble-connect-workspace-api/index.js"></script>
+</head>
+<body>
+  <main class="app">
+    <header class="header">
+      <div>
+        <h1>CDE BIM PDF Linker</h1>
+        <p>Gắn hồ sơ PDF vào cấu kiện BIM trong Trimble Connect</p>
+      </div>
+      <span id="apiStatus" class="badge badge-gray">Chưa kết nối</span>
+    </header>
+
+    <section class="card">
+      <h2>1. Cấu hình Backend</h2>
+      <label for="backendUrl">Backend URL</label>
+      <div class="row">
+        <input id="backendUrl" type="text" value="http://localhost:8000" />
+        <button id="saveBackendBtn" type="button">Lưu</button>
+      </div>
+      <button id="testBackendBtn" type="button" class="secondary">Test /health</button>
+      <p id="backendMessage" class="message"></p>
+    </section>
+
+    <section class="card">
+      <h2>2. Đối tượng đang chọn</h2>
+      <dl class="info-grid">
+        <dt>Project</dt>
+        <dd id="projectInfo">-</dd>
+        <dt>Model ID</dt>
+        <dd id="modelId">-</dd>
+        <dt>Runtime ID</dt>
+        <dd id="runtimeId">-</dd>
+        <dt>IFC GlobalId</dt>
+        <dd id="ifcGuid">-</dd>
+        <dt>Mã hiệu</dt>
+        <dd id="elementCode">-</dd>
+        <dt>Tên cấu kiện</dt>
+        <dd id="elementName">-</dd>
+      </dl>
+      <p id="selectionMessage" class="message">Hãy click một cấu kiện trong mô hình 3D.</p>
+    </section>
+
+    <section class="card">
+      <h2>3. Hồ sơ PDF đã gắn</h2>
+      <div id="documentsList" class="documents empty">Chưa có cấu kiện được chọn.</div>
+    </section>
+
+    <section class="card">
+      <h2>4. Gắn link PDF mới</h2>
+      <label for="fileName">Tên file</label>
+      <input id="fileName" type="text" placeholder="BBNT_N5_BV_L1_B01_Thep_R01.pdf" />
+
+      <label for="fileUrl">URL PDF</label>
+      <input id="fileUrl" type="url" placeholder="https://.../file.pdf" />
+
+      <div class="row two">
+        <div>
+          <label for="documentType">Loại hồ sơ</label>
+          <input id="documentType" type="text" placeholder="BBNT / BVHC / CL" />
+        </div>
+        <div>
+          <label for="revision">Revision</label>
+          <input id="revision" type="text" placeholder="R01" />
+        </div>
+      </div>
+
+      <button id="attachBtn" type="button">Gắn Link vào Cấu kiện</button>
+      <p id="attachMessage" class="message"></p>
+    </section>
+
+    <section class="card muted">
+      <h2>Chế độ test ngoài Trimble</h2>
+      <p>Khi mở file này ngoài Trimble, bạn có thể nhập tay dữ liệu để test backend.</p>
+      <div class="row two">
+        <div>
+          <label for="manualProjectId">Project ID</label>
+          <input id="manualProjectId" type="text" placeholder="demo_project" />
+        </div>
+        <div>
+          <label for="manualModelId">Model ID</label>
+          <input id="manualModelId" type="text" placeholder="demo_model" />
+        </div>
+      </div>
+      <label for="manualIfcGuid">IFC GlobalId</label>
+      <input id="manualIfcGuid" type="text" placeholder="demo_ifc_guid" />
+      <label for="manualElementCode">Mã hiệu</label>
+      <input id="manualElementCode" type="text" placeholder="N5_BV_L1_B01" />
+      <button id="manualSelectBtn" type="button" class="secondary">Dùng dữ liệu test</button>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
