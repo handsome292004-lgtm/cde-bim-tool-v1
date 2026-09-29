@@ -1,16 +1,24 @@
 let API = null;
 let currentProject = null;
 let currentSelection = null;
-let accessToken = null;
-let pdfCache = [];
+let libraryDocs = [];
+let currentLinkedDocs = [];
 
-const PDF_CACHE_KEY_PREFIX = "CDE_TRIMBLE_PDF_CACHE_V1";
-const DEFAULT_CORE_API = "https://app.connect.trimble.com/tc/api/2.0";
-const DEFAULT_BACKEND_PROXY_URL = "";
-const DEFAULT_FOLDER_ID = "";
+const DB_NAME = "CDE_BIM_HOSO_DB_V1";
+const DB_VERSION = 1;
+const DOC_STORE = "docs";
+const LINK_STORE = "links";
 
 function $(id) { return document.getElementById(id); }
-
+function safeText(v) { return v === null || v === undefined || v === "" ? "-" : String(v); }
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
 function setMessage(id, text, type = "") {
   const el = $(id);
   if (!el) return;
@@ -22,52 +30,208 @@ function setStatus(text, type = "gray") {
   el.textContent = text;
   el.className = `badge badge-${type}`;
 }
-function safeText(value) { return value === null || value === undefined || value === "" ? "-" : String(value); }
-function sanitizeCode(value) { return String(value || "").trim(); }
-function getCoreApiBase() { return ($("coreApiBase").value.trim() || DEFAULT_CORE_API).replace(/\/$/, ""); }
-function getBackendProxyUrl() { return (($("backendProxyUrl")?.value || localStorage.getItem("CDE_BACKEND_PROXY_URL") || DEFAULT_BACKEND_PROXY_URL).trim()).replace(/\/$/, ""); }
-function cacheKey() { return `${PDF_CACHE_KEY_PREFIX}:${currentProject?.id || "no_project"}`; }
-
-function setActiveTab(tabName) {
-  document.querySelectorAll(".tab-button").forEach(btn => btn.classList.toggle("active", btn.dataset.tab === tabName));
-  document.querySelectorAll(".tab-panel").forEach(panel => panel.classList.toggle("active", panel.id === `tab-${tabName}`));
+function setActiveTab(name) {
+  document.querySelectorAll(".tab-button")
+    .forEach(btn => btn.classList.toggle("active", btn.dataset.tab === name));
+  document.querySelectorAll(".tab-panel")
+    .forEach(panel => panel.classList.toggle("active", panel.id === `tab-${name}`));
 }
 function initTabs() {
-  document.querySelectorAll(".tab-button").forEach(btn => btn.addEventListener("click", () => setActiveTab(btn.dataset.tab)));
+  document.querySelectorAll(".tab-button")
+    .forEach(btn => btn.addEventListener("click", () => setActiveTab(btn.dataset.tab)));
 }
 
-function savePdfCache() {
-  if (!currentProject?.id) return;
-  localStorage.setItem(cacheKey(), JSON.stringify({ scannedAt: new Date().toISOString(), files: pdfCache }));
-  updateSourceStats();
+/* ---------------- IndexedDB ---------------- */
+
+function openDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(DOC_STORE)) {
+        db.createObjectStore(DOC_STORE, { keyPath: "id" });
+      }
+      if (!db.objectStoreNames.contains(LINK_STORE)) {
+        db.createObjectStore(LINK_STORE, { keyPath: "objectKey" });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
 }
-function loadPdfCache() {
-  if (!currentProject?.id) return;
-  try {
-    const raw = localStorage.getItem(cacheKey());
-    if (!raw) return;
-    const data = JSON.parse(raw);
-    pdfCache = Array.isArray(data.files) ? data.files : [];
-    $("lastScanInfo").textContent = data.scannedAt ? new Date(data.scannedAt).toLocaleString() : "-";
-    updateSourceStats();
-  } catch (err) {
-    console.warn("Could not load PDF cache", err);
+async function dbGetAll(storeName) {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, "readonly");
+    const req = tx.objectStore(storeName).getAll();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(req.error);
+    tx.oncomplete = () => db.close();
+  });
+}
+async function dbGet(storeName, key) {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, "readonly");
+    const req = tx.objectStore(storeName).get(key);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+    tx.oncomplete = () => db.close();
+  });
+}
+async function dbPut(storeName, value) {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, "readwrite");
+    tx.objectStore(storeName).put(value);
+    tx.oncomplete = () => { db.close(); resolve(); };
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function dbDelete(storeName, key) {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, "readwrite");
+    tx.objectStore(storeName).delete(key);
+    tx.oncomplete = () => { db.close(); resolve(); };
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function dbClear(storeName) {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, "readwrite");
+    tx.objectStore(storeName).clear();
+    tx.oncomplete = () => { db.close(); resolve(); };
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+/* ---------------- PDF library ---------------- */
+
+function makeDocId(file) {
+  const raw = `${file.name}|${file.size}|${file.lastModified}|${file.webkitRelativePath || ""}`;
+  let h = 2166136261;
+  for (let i = 0; i < raw.length; i++) {
+    h ^= raw.charCodeAt(i);
+    h = Math.imul(h, 16777619);
   }
+  return `pdf_${(h >>> 0).toString(16)}`;
 }
-function updateSourceStats() {
-  $("pdfCount").textContent = String(pdfCache.length || 0);
-  $("tokenStatus").textContent = accessToken ? "Đã có token" : "Chưa có token";
-  if (pdfCache.length && currentSelection?.elementCode) renderDocumentsForSelection();
+function isPdf(file) {
+  return file && (
+    file.type === "application/pdf" ||
+    String(file.name || "").toLowerCase().endsWith(".pdf")
+  );
+}
+function formatBytes(bytes) {
+  const n = Number(bytes || 0);
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+}
+function normalize(value) {
+  return String(value || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\.pdf$/i, "")
+    .replace(/[^a-z0-9_\-./ ]/g, "")
+    .trim();
+}
+function matchDocsByCode(code) {
+  const c = normalize(code);
+  if (!c) return [];
+  const exact = [];
+  const partial = [];
+  for (const doc of libraryDocs) {
+    const name = normalize(doc.name);
+    if (name === c) exact.push(doc);
+    else if (name.includes(c)) partial.push(doc);
+  }
+  return [...exact, ...partial];
+}
+async function importFiles(fileList) {
+  const files = [...fileList].filter(isPdf);
+  if (!files.length) {
+    setMessage("libraryMessage", "Không có file PDF hợp lệ.", "warn");
+    return;
+  }
+  let added = 0;
+  for (const file of files) {
+    const doc = {
+      id: makeDocId(file),
+      name: file.name,
+      size: file.size,
+      type: file.type || "application/pdf",
+      lastModified: file.lastModified,
+      relativePath: file.webkitRelativePath || "",
+      blob: file,
+      addedAt: new Date().toISOString(),
+    };
+    await dbPut(DOC_STORE, doc);
+    added++;
+  }
+  await refreshLibrary();
+  setMessage("libraryMessage", `Đã thêm ${added} file PDF vào thư viện.`, "ok");
+}
+async function refreshLibrary() {
+  libraryDocs = await dbGetAll(DOC_STORE);
+  libraryDocs.sort((a, b) => String(a.name).localeCompare(String(b.name), "vi"));
+  $("summaryDocs").textContent = String(libraryDocs.length);
+  renderLibrary();
+  renderQuickMatches();
+}
+function renderLibrary() {
+  const list = $("libraryList");
+  const q = normalize($("librarySearch")?.value || "");
+  const docs = q
+    ? libraryDocs.filter(d => normalize(`${d.name} ${d.relativePath}`).includes(q))
+    : libraryDocs;
+
+  if (!docs.length) {
+    list.innerHTML = `<div class="empty-state">${
+      libraryDocs.length ? "Không có hồ sơ phù hợp từ khóa." : "Chưa có PDF trong thư viện."
+    }</div>`;
+    return;
+  }
+
+  list.innerHTML = docs.map(doc => `
+    <div class="file-item">
+      <div>
+        <div class="file-name">${escapeHtml(doc.name)}</div>
+        <div class="file-meta">${escapeHtml(doc.relativePath || "Hồ sơ nghiệm thu")} · ${formatBytes(doc.size)}</div>
+      </div>
+      <div class="file-actions">
+        <button class="icon-btn open" type="button" onclick="openLibraryDoc('${doc.id}')">Mở</button>
+        <button class="icon-btn remove" type="button" onclick="removeLibraryDoc('${doc.id}')">Xóa</button>
+      </div>
+    </div>
+  `).join("");
+}
+async function openLibraryDoc(id) {
+  const doc = await dbGet(DOC_STORE, id);
+  if (!doc?.blob) return;
+  const url = URL.createObjectURL(doc.blob);
+  window.open(url, "_blank", "noopener,noreferrer");
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+async function removeLibraryDoc(id) {
+  await dbDelete(DOC_STORE, id);
+  await refreshLibrary();
+  await loadCurrentLinks();
+  setMessage("libraryMessage", "Đã xóa hồ sơ khỏi thư viện.", "ok");
+}
+async function clearLibrary() {
+  if (!confirm("Xóa toàn bộ PDF trong thư viện dashboard?")) return;
+  await dbClear(DOC_STORE);
+  await dbClear(LINK_STORE);
+  await refreshLibrary();
+  await loadCurrentLinks();
+  setMessage("libraryMessage", "Đã xóa toàn bộ thư viện và liên kết.", "ok");
 }
 
-function updateSelectionUi(selection) {
-  $("projectInfo").textContent = currentProject ? `${currentProject.name || "Project"} (${currentProject.id})` : safeText(selection?.project_id);
-  $("modelId").textContent = safeText(selection?.modelId || selection?.model_id);
-  $("runtimeId").textContent = safeText(selection?.runtimeId);
-  $("ifcGuid").textContent = safeText(selection?.ifcGuid || selection?.ifc_guid);
-  $("elementCode").textContent = safeText(selection?.elementCode || selection?.element_code);
-  $("elementName").textContent = safeText(selection?.elementName || selection?.element_name);
-}
+/* ---------------- Trimble selection ---------------- */
 
 function getSelectionFromEventArg(arg) {
   const data = arg?.data ?? arg;
@@ -78,130 +242,10 @@ function getSelectionFromEventArg(arg) {
   return [];
 }
 function getRuntimeIds(modelSelection) {
-  return modelSelection?.objectRuntimeIds || modelSelection?.runtimeIds || modelSelection?.objectIds || [];
+  return modelSelection?.objectRuntimeIds ||
+    modelSelection?.runtimeIds ||
+    modelSelection?.objectIds || [];
 }
-
-async function initTrimble() {
-  $("coreApiBase").value = localStorage.getItem("CDE_CORE_API_BASE") || DEFAULT_CORE_API;
-  if ($("backendProxyUrl")) $("backendProxyUrl").value = localStorage.getItem("CDE_BACKEND_PROXY_URL") || "";
-  $("folderFilter").value = localStorage.getItem("CDE_TRIMBLE_PDF_FOLDER_FILTER") || $("folderFilter").value;
-  if ($("folderIdInput")) $("folderIdInput").value = localStorage.getItem("CDE_TRIMBLE_PDF_FOLDER_ID") || DEFAULT_FOLDER_ID;
-
-  if (!window.TrimbleConnectWorkspace || window.parent === window) {
-    setStatus("Test ngoài Trimble", "warn");
-    setMessage("selectionMessage", "Đang mở ngoài Trimble. Vào tab Test để kiểm tra bằng mã hiệu.", "warn");
-    updateSourceStats();
-    return;
-  }
-
-  try {
-    API = await TrimbleConnectWorkspace.connect(window.parent, async (event, arg) => {
-      if (event === "viewer.onSelectionChanged") await handleSelectionChanged(arg);
-      if (event === "extension.accessToken") handleAccessTokenEvent(arg);
-    }, 30000);
-
-    currentProject = await API.project.getProject();
-    setStatus("Đã kết nối Trimble", "ok");
-    updateSelectionUi(currentSelection);
-    loadPdfCache();
-    setMessage("selectionMessage", "Đã kết nối Trimble. Hãy click cấu kiện.", "ok");
-
-    try {
-      const existingSelection = await API.viewer.getSelection();
-      await handleSelectionChanged(existingSelection);
-    } catch (err) {
-      console.warn("Could not read initial selection", err);
-    }
-  } catch (err) {
-    console.error(err);
-    setStatus("Lỗi Trimble API", "danger");
-    setMessage("selectionMessage", `Không kết nối được Workspace API: ${err.message || err}`, "error");
-  }
-}
-
-function handleAccessTokenEvent(arg) {
-  const data = arg?.data ?? arg;
-  const token = typeof data === "string" ? data : (data?.accessToken || data?.token || data?.value);
-  if (token) {
-    accessToken = token;
-    updateSourceStats();
-    setMessage("sourceMessage", "Đã nhận Access Token từ Trimble.", "ok");
-  }
-}
-
-async function requestAccessToken() {
-  if (!API?.extension) {
-    setMessage("sourceMessage", "Chỉ xin token được khi tool đang chạy trong Trimble.", "error");
-    return null;
-  }
-  if (accessToken) return accessToken;
-  try {
-    if (API.extension.requestPermission) {
-      const result = await API.extension.requestPermission("accesstoken");
-      if (typeof result === "string" && result.length > 50 && result.split(".").length >= 2) {
-        accessToken = result;
-      } else {
-        setMessage("sourceMessage", `Đã gửi yêu cầu quyền token: ${result}. Nếu có hộp thoại hiện ra, hãy bấm Allow/Cho phép.`, "warn");
-      }
-    } else if (API.extension.getPermission) {
-      accessToken = await API.extension.getPermission("accesstoken");
-    }
-  } catch (err) {
-    setMessage("sourceMessage", `Không lấy được token: ${err.message || err}`, "error");
-  }
-  updateSourceStats();
-  return accessToken;
-}
-
-async function handleSelectionChanged(arg) {
-  const selection = getSelectionFromEventArg(arg);
-  if (!selection.length) {
-    currentSelection = null;
-    updateSelectionUi(null);
-    renderDocuments([]);
-    setMessage("selectionMessage", "Chưa chọn cấu kiện hoặc selection rỗng.", "warn");
-    return;
-  }
-
-  const first = selection[0];
-  const modelId = first.modelId || first.model_id || first.modelID;
-  const runtimeIds = getRuntimeIds(first);
-  if (!modelId || !runtimeIds.length) {
-    setMessage("selectionMessage", "Không lấy được modelId hoặc runtimeId từ selection.", "error");
-    return;
-  }
-
-  const runtimeId = Number(runtimeIds[0]);
-  let ifcGuid = null, elementCode = null, elementName = null;
-  try {
-    const objectIds = await API.viewer.convertToObjectIds(modelId, [runtimeId]);
-    ifcGuid = objectIds?.[0];
-  } catch (err) {
-    console.warn("Cannot convert runtime id", err);
-  }
-
-  try {
-    const props = await API.viewer.getObjectProperties(modelId, [runtimeId]);
-    const extracted = extractElementInfoFromProperties(props?.[0]);
-    elementCode = extracted.elementCode;
-    elementName = extracted.elementName;
-  } catch (err) {
-    console.warn("Could not read object properties", err);
-  }
-
-  currentSelection = { project_id: currentProject?.id || null, modelId, runtimeId, ifcGuid, elementCode, elementName };
-  updateSelectionUi(currentSelection);
-
-  if (!elementCode) {
-    renderDocuments([]);
-    setMessage("selectionMessage", "Đã chọn cấu kiện nhưng chưa đọc được Mã hiệu từ Thong_tin_BIM.", "warn");
-    return;
-  }
-
-  setMessage("selectionMessage", `Đã chọn cấu kiện: ${elementCode}.`, "ok");
-  renderDocumentsForSelection();
-}
-
 function extractElementInfoFromProperties(objectProperties) {
   const result = { elementCode: null, elementName: null };
   if (!objectProperties) return result;
@@ -211,14 +255,18 @@ function extractElementInfoFromProperties(objectProperties) {
     if (Array.isArray(node)) return node.forEach(walk);
     if (typeof node === "object") {
       const name = node.name || node.propertyName || node.key || node.label;
-      const value = node.value || node.propertyValue || node.val;
-      if (name !== undefined && value !== undefined) pairs.push({ name: String(name), value: String(value) });
+      const value = node.value ?? node.propertyValue ?? node.val;
+      if (name !== undefined && value !== undefined) {
+        pairs.push({ name: String(name), value: String(value) });
+      }
       Object.values(node).forEach(walk);
     }
   }
   walk(objectProperties);
+
   const codeKeys = ["mã hiệu", "ma hieu", "ma_hieu", "element_code", "mã cấu kiện", "ma cau kien"];
   const nameKeys = ["name", "tên", "ten", "tên cấu kiện", "ten cau kien", "element_name"];
+
   for (const pair of pairs) {
     const key = pair.name.trim().toLowerCase();
     if (!result.elementCode && codeKeys.some(k => key.includes(k))) result.elementCode = pair.value;
@@ -227,538 +275,278 @@ function extractElementInfoFromProperties(objectProperties) {
   result.elementName = result.elementName || objectProperties.name || objectProperties.Name || null;
   return result;
 }
+function updateSelectionUi() {
+  $("elementCode").textContent = safeText(currentSelection?.elementCode);
+  $("elementName").textContent = safeText(currentSelection?.elementName);
+  $("ifcGuid").textContent = safeText(currentSelection?.ifcGuid);
+  $("summaryCode").textContent = safeText(currentSelection?.elementCode);
+}
+function currentObjectKey() {
+  if (!currentSelection) return null;
+  const project = currentProject?.id || "project";
+  const model = currentSelection.modelId || "model";
+  const object = currentSelection.ifcGuid || currentSelection.runtimeId || "object";
+  return `${project}::${model}::${object}`;
+}
 
-async function scanTrimblePdfs() {
-  localStorage.setItem("CDE_CORE_API_BASE", getCoreApiBase());
-  localStorage.setItem("CDE_TRIMBLE_PDF_FOLDER_FILTER", $("folderFilter").value.trim());
-  if ($("folderIdInput")) localStorage.setItem("CDE_TRIMBLE_PDF_FOLDER_ID", $("folderIdInput").value.trim());
-
-  if (!currentProject?.id) {
-    setMessage("sourceMessage", "Chưa có Project ID. Hãy mở tool trong Trimble Project.", "error");
+async function initTrimble() {
+  if (!window.TrimbleConnectWorkspace || window.parent === window) {
+    setStatus("Mở ngoài Trimble", "warn");
+    setMessage("selectionMessage", "Dashboard đang mở ngoài Trimble.", "warn");
     return;
   }
-  const token = await requestAccessToken();
-  if (!token) return;
 
-  const backendUrl = getBackendProxyUrl();
-  if (!backendUrl) {
-    setMessage("sourceMessage", "Bạn cần nhập Backend Proxy URL trước, ví dụ https://...trycloudflare.com", "error");
-    return;
-  }
-
-  setMessage("sourceMessage", "Đang quét file PDF trong Trimble Project qua backend proxy...", "warn");
   try {
-    const res = await fetch(`${backendUrl}/api/trimble/scan-pdfs`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        project_id: currentProject.id,
-        token,
-        core_api_base: getCoreApiBase(),
-        folder_filter: $("folderFilter").value.trim(),
-        folder_id: ($("folderIdInput")?.value || "").trim()
-      })
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      const detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail || data);
-      throw new Error(`${res.status} ${res.statusText}: ${detail}`);
-    }
+    API = await TrimbleConnectWorkspace.connect(window.parent, async (event, arg) => {
+      if (event === "viewer.onSelectionChanged") await handleSelectionChanged(arg);
+    }, 30000);
 
-    if (data.ok === false) {
-      const firstError = (data.candidate_errors || [])[0];
-      const detail = firstError ? `\nNguồn lỗi: ${firstError.url || ""}\n${firstError.error || ""}` : "";
-      setMessage("sourceMessage", `${data.message || "Không quét được PDF."}${detail}`, "error");
-      console.warn("Trimble scan debug", data);
-      return;
-    }
+    currentProject = await API.project.getProject();
+    setStatus("Đã kết nối Trimble", "ok");
+    setMessage("selectionMessage", "Đã kết nối. Hãy click một cấu kiện.", "ok");
 
-    pdfCache = dedupeByNameAndId((data.files || []).map(normalizeTrimbleFile));
-    savePdfCache();
-    $("lastScanInfo").textContent = new Date().toLocaleString();
-    const apiNote = data.source_url ? ` Nguồn: ${data.source_url}` : "";
-    setMessage("sourceMessage", `Đã quét ${pdfCache.length} file PDF từ Trimble Project.${apiNote}`, pdfCache.length ? "ok" : "warn");
-    renderDocumentsForSelection();
+    try {
+      const existing = await API.viewer.getSelection();
+      await handleSelectionChanged(existing);
+    } catch (e) {
+      console.warn("Could not read initial selection", e);
+    }
   } catch (err) {
     console.error(err);
-    setMessage("sourceMessage", `Lỗi khi quét Trimble PDF qua backend: ${err.message || err}`, "error");
+    setStatus("Lỗi kết nối", "danger");
+    setMessage("selectionMessage", `Không kết nối được Trimble: ${err.message || err}`, "error");
   }
 }
 
-async function trimbleApiFetch(url, token, options = {}) {
-  const headers = new Headers(options.headers || {});
-  headers.set("Authorization", `Bearer ${token}`);
-  headers.set("Accept", "application/json, application/pdf, */*");
-  return fetch(url, { ...options, headers });
-}
-
-async function fetchTrimbleProjectFiles(projectId, token) {
-  const base = getCoreApiBase();
-  const encodedProject = encodeURIComponent(projectId);
-  const candidates = [
-    `${base}/projects/${encodedProject}/files?fullyLoaded=true&pageSize=1000`,
-    `${base}/projects/${encodedProject}/files?includeFolders=true&pageSize=1000`,
-    `${base}/projects/${encodedProject}/files?pageSize=1000`,
-    `${base}/projects/${encodedProject}/files`
-  ];
-
-  let lastError = null;
-  for (const url of candidates) {
-    try {
-      const res = await trimbleApiFetch(url, token);
-      if (!res.ok) {
-        lastError = new Error(`${res.status} ${res.statusText} at ${url}`);
-        continue;
-      }
-      const data = await res.json();
-      const items = collectFileLikeObjects(data);
-      if (items.length) return items;
-      lastError = new Error(`API trả về 0 file tại ${url}`);
-    } catch (err) {
-      lastError = err;
-    }
-  }
-  throw lastError || new Error("Không đọc được danh sách file từ Trimble Core API.");
-}
-
-function collectFileLikeObjects(data) {
-  const output = [];
-  const seen = new WeakSet();
-  function walk(node, inheritedPath = "") {
-    if (!node) return;
-    if (Array.isArray(node)) return node.forEach(x => walk(x, inheritedPath));
-    if (typeof node !== "object") return;
-    if (seen.has(node)) return;
-    seen.add(node);
-
-    const name = node.name || node.fileName || node.title || node.displayName;
-    const type = String(node.type || node.objectType || node.itemType || "").toLowerCase();
-    const path = node.path || node.folderPath || node.location || inheritedPath;
-    if (name && (type.includes("file") || String(name).includes("."))) output.push({ ...node, name, path });
-
-    const nextPath = name && (type.includes("folder") || node.children || node.items) ? [inheritedPath, name].filter(Boolean).join("/") : inheritedPath;
-    for (const value of Object.values(node)) walk(value, nextPath);
-  }
-  walk(data, "");
-  return output;
-}
-
-function normalizeTrimbleFile(f) {
-  const id = f.id || f.fileId || f.identifier || f.fileIdentifier || f.file_id || f.objectId || f.versionId || f.version_id;
-  const name = f.name || f.fileName || f.title || f.displayName;
-  const path = f.path || f.folderPath || f.location || f.parentPath || "";
-  const directUrl = f.downloadUrl || f.url || f.webUrl || f.viewerUrl || f?.links?.download?.href || f?._links?.download?.href || f?.links?.self?.href || f?._links?.self?.href || "";
-  return { id, name, path, directUrl, raw: f };
-}
-function dedupeByNameAndId(files) {
-  const map = new Map();
-  for (const f of files) map.set(`${f.id || "noid"}:${f.name}:${f.path}`, f);
-  return [...map.values()].sort((a,b) => String(a.name).localeCompare(String(b.name)));
-}
-function normalizeForMatch(text) {
-  return String(text || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9_\-./ ]/g, "");
-}
-function findDocsByCode(elementCode) {
-  const code = normalizeForMatch(elementCode);
-  if (!code) return [];
-  return pdfCache.filter(f => normalizeForMatch(f.name).includes(code));
-}
-function renderDocumentsForSelection() {
-  if (!currentSelection?.elementCode) {
-    renderDocuments([]);
+async function handleSelectionChanged(arg) {
+  const selection = getSelectionFromEventArg(arg);
+  if (!selection.length) {
+    currentSelection = null;
+    updateSelectionUi();
+    renderQuickMatches();
+    await loadCurrentLinks();
+    setMessage("selectionMessage", "Chưa chọn cấu kiện.", "warn");
     return;
   }
-  const docs = findDocsByCode(currentSelection.elementCode);
-  renderDocuments(docs);
-  const msg = docs.length
-    ? `Tìm thấy ${docs.length} PDF khớp Mã hiệu ${currentSelection.elementCode}.`
-    : `Chưa thấy PDF khớp Mã hiệu ${currentSelection.elementCode}. Hãy quét lại nguồn PDF hoặc kiểm tra tên file.`;
-  setMessage("documentsMessage", msg, docs.length ? "ok" : "warn");
-}
-function renderDocuments(docs) {
-  const box = $("documentsList");
-  if (!currentSelection) {
-    box.className = "documents empty";
-    box.innerHTML = "Chưa có cấu kiện được chọn.";
-    return;
-  }
-  if (!docs.length) {
-    box.className = "documents empty";
-    box.innerHTML = "Cấu kiện này chưa có hồ sơ PDF khớp Mã hiệu.";
-    return;
-  }
-  box.className = "documents";
-  box.innerHTML = docs.map((doc, index) => `
-    <article class="doc-item">
-      <div class="doc-title"><span>${escapeHtml(doc.name)}</span><span>#${index + 1}</span></div>
-      <div class="doc-meta">${escapeHtml(doc.path || "Trimble Project")}</div>
-      <div class="doc-actions">
-        <button class="small" type="button" onclick="openTrimblePdf(${index})">Mở PDF</button>
-        <button class="small secondary" type="button" onclick="copyFileName(${index})">Copy tên</button>
-      </div>
-    </article>`).join("");
-  window.__lastDocs = docs;
-}
 
-async function openTrimblePdf(index) {
-  const docs = window.__lastDocs || [];
-  const doc = docs[index];
-  if (!doc) return;
-  const token = accessToken || await requestAccessToken();
-  if (!token) {
-    setMessage("documentsMessage", "Cần Access Token để mở PDF từ Trimble API.", "error");
+  const first = selection[0];
+  const modelId = first.modelId || first.model_id || first.modelID;
+  const runtimeIds = getRuntimeIds(first);
+  if (!modelId || !runtimeIds.length) {
+    setMessage("selectionMessage", "Không đọc được modelId/runtimeId.", "error");
     return;
   }
-  const urls = buildDownloadCandidates(doc);
-  for (const url of urls) {
-    try {
-      const res = await trimbleApiFetch(url, token);
-      if (!res.ok) continue;
-      const contentType = res.headers.get("content-type") || "";
-      if (contentType.includes("application/json")) {
-        const data = await res.json();
-        const nextUrl = data.url || data.downloadUrl || data.href || data?.links?.download?.href || data?._links?.download?.href;
-        if (nextUrl) window.open(nextUrl, "_blank", "noopener,noreferrer");
-        return;
-      }
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      window.open(blobUrl, "_blank", "noopener,noreferrer");
-      return;
-    } catch (err) {
-      console.warn("PDF open candidate failed", url, err);
-    }
-  }
-  if (doc.directUrl) window.open(doc.directUrl, "_blank", "noopener,noreferrer");
-  else setMessage("documentsMessage", "Không mở được PDF. API không trả download URL hợp lệ.", "error");
-}
-function buildDownloadCandidates(doc) {
-  const base = getCoreApiBase();
-  const projectId = encodeURIComponent(currentProject?.id || "");
-  const id = encodeURIComponent(doc.id || "");
-  return [
-    doc.directUrl,
-    id ? `${base}/projects/${projectId}/files/${id}/download` : null,
-    id ? `${base}/projects/${projectId}/files/${id}/content` : null,
-    id ? `${base}/files/${id}/download?projectId=${projectId}` : null,
-    id ? `${base}/files/${id}/download` : null,
-    id ? `${base}/files/${id}` : null
-  ].filter(Boolean);
-}
-function copyFileName(index) {
-  const docs = window.__lastDocs || [];
-  const doc = docs[index];
-  if (doc?.name) navigator.clipboard?.writeText(doc.name);
-}
-function useManualSelection() {
-  currentProject = currentProject || { id: "manual_project", name: "Manual Test" };
-  currentSelection = { elementCode: $("manualElementCode").value.trim(), elementName: null, ifcGuid: "manual", modelId: "manual", runtimeId: "manual" };
-  updateSelectionUi(currentSelection);
-  renderDocumentsForSelection();
-  setActiveTab("docs");
-}
-function clearPdfCache() {
-  pdfCache = [];
-  if (currentProject?.id) localStorage.removeItem(cacheKey());
-  updateSourceStats();
-  renderDocumentsForSelection();
-  setMessage("sourceMessage", "Đã xóa cache PDF.", "ok");
-}
-function escapeHtml(value) {
-  return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
-}
-async function testBackendProxy() {
-  const backendUrl = getBackendProxyUrl();
-  if (!backendUrl) {
-    setMessage("sourceMessage", "Chưa nhập Backend Proxy URL.", "error");
-    return;
-  }
+
+  const runtimeId = Number(runtimeIds[0]);
+  let ifcGuid = null;
+  let elementCode = null;
+  let elementName = null;
+
   try {
-    const res = await fetch(`${backendUrl}/health`);
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-    const data = await res.json();
-    setMessage("sourceMessage", `Backend OK: ${JSON.stringify(data)}`, "ok");
+    const ids = await API.viewer.convertToObjectIds(modelId, [runtimeId]);
+    ifcGuid = ids?.[0] || null;
   } catch (err) {
-    setMessage("sourceMessage", `Không kết nối được backend proxy: ${err.message || err}`, "error");
+    console.warn("convertToObjectIds failed", err);
   }
-}
 
-function saveBackendProxy() {
-  const url = getBackendProxyUrl();
-  localStorage.setItem("CDE_BACKEND_PROXY_URL", url);
-  setMessage("sourceMessage", `Đã lưu Backend Proxy URL: ${url || "(trống)"}`, "ok");
-}
-
-window.openTrimblePdf = openTrimblePdf;
-window.copyFileName = copyFileName;
-
-window.addEventListener("DOMContentLoaded", () => {
-  initTabs();
-  $("requestTokenBtn").addEventListener("click", requestAccessToken);
-  if ($("saveBackendProxyBtn")) $("saveBackendProxyBtn").addEventListener("click", saveBackendProxy);
-  if ($("testBackendProxyBtn")) $("testBackendProxyBtn").addEventListener("click", testBackendProxy);
-  $("scanTrimblePdfBtn").addEventListener("click", scanTrimblePdfs);
-  $("clearPdfCacheBtn").addEventListener("click", clearPdfCache);
-  $("refreshMatchBtn").addEventListener("click", renderDocumentsForSelection);
-  $("manualSelectBtn").addEventListener("click", useManualSelection);
-  initTrimble();
-});
-
-// === CDE NATIVE OBJECT LINK V2 ===
-let cdeNativeTemplate = null;
-let cdeNativeSample = null;
-let cdeNativeBusy = false;
-const CDE_NATIVE_TEMPLATE_PREFIX = "CDE_NATIVE_OBJECTLINK_TEMPLATE_V2";
-
-function cdeNativeTemplateKey() {
-  return `${CDE_NATIVE_TEMPLATE_PREFIX}:${currentProject?.id || "no_project"}`;
-}
-function cdeNativeSetMsg(text, type = "") {
-  const el = document.getElementById("cdeNativeMessage");
-  if (!el) return;
-  el.textContent = text || "";
-  el.className = `message ${type}`.trim();
-}
-function cdeNativeDocForCurrentSelection() {
-  if (!currentSelection?.elementCode) return null;
-  const docs = findDocsByCode(currentSelection.elementCode);
-  return docs?.[0] || null;
-}
-function cdeNativeFileVersionId(doc) {
-  const r = doc?.raw || {};
-  return r.versionId || r.version_id || r.fileVersionId || r.file_version_id || null;
-}
-function cdeNativeSaveTemplate(data) {
-  cdeNativeTemplate = data?.template_link || data?.template_sanitized || null;
-  if (!cdeNativeTemplate || !cdeNativeSample) return;
-  localStorage.setItem(
-    cdeNativeTemplateKey(),
-    JSON.stringify({ template: cdeNativeTemplate, sample: cdeNativeSample })
-  );
-  cdeNativeRefreshUi();
-}
-function cdeNativeLoadTemplate() {
   try {
-    const raw = localStorage.getItem(cdeNativeTemplateKey());
-    if (!raw) return;
-    const data = JSON.parse(raw);
-    cdeNativeTemplate = data.template || null;
-    cdeNativeSample = data.sample || null;
+    const props = await API.viewer.getObjectProperties(modelId, [runtimeId]);
+    const info = extractElementInfoFromProperties(props?.[0]);
+    elementCode = info.elementCode;
+    elementName = info.elementName;
   } catch (err) {
-    console.warn("Could not load native template", err);
-  }
-  cdeNativeRefreshUi();
-}
-function cdeNativeRefreshUi() {
-  const status = document.getElementById("cdeNativeTemplateStatus");
-  if (status) status.textContent = cdeNativeTemplate ? "Đã có mẫu Object Link" : "Chưa học mẫu";
-  const auto = document.getElementById("cdeNativeAuto");
-  if (auto) auto.checked = localStorage.getItem("CDE_NATIVE_AUTO_LINK") === "1";
-}
-
-async function cdeNativeLearnTemplate() {
-  const backendUrl = getBackendProxyUrl();
-  const token = accessToken || await requestAccessToken();
-  const doc = cdeNativeDocForCurrentSelection();
-
-  if (!backendUrl) return cdeNativeSetMsg("Chưa có Backend Proxy URL.", "error");
-  if (!token) return cdeNativeSetMsg("Chưa có Access Token.", "error");
-  if (!currentProject?.id || !currentSelection?.ifcGuid || !currentSelection?.modelId) {
-    return cdeNativeSetMsg("Hãy chọn đúng 1 cấu kiện IFC trước.", "error");
-  }
-  if (!doc?.id) {
-    return cdeNativeSetMsg("Chưa có PDF khớp Mã hiệu trong cache. Hãy Quét PDF trước.", "error");
+    console.warn("getObjectProperties failed", err);
   }
 
-  cdeNativeSample = {
-    sample_object_id: currentSelection.ifcGuid,
-    sample_model_id: currentSelection.modelId,
-    sample_file_id: String(doc.id),
-    sample_file_version_id: cdeNativeFileVersionId(doc),
-    element_code: currentSelection.elementCode,
-    file_name: doc.name,
+  currentSelection = {
+    modelId,
+    runtimeId,
+    ifcGuid,
+    elementCode,
+    elementName,
   };
 
-  cdeNativeSetMsg(`Đang tìm liên kết mẫu: ${currentSelection.elementCode} ↔ ${doc.name}...`, "warn");
+  updateSelectionUi();
+  renderQuickMatches();
+  await loadCurrentLinks();
 
-  try {
-    const res = await fetch(`${backendUrl}/api/trimble/objectlinks/learn-template`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        project_id: currentProject.id,
-        token,
-        core_api_base: getCoreApiBase(),
-        sample_object_id: cdeNativeSample.sample_object_id,
-        sample_model_id: cdeNativeSample.sample_model_id,
-        sample_file_id: cdeNativeSample.sample_file_id,
-        sample_file_version_id: cdeNativeSample.sample_file_version_id,
-      }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      const detail = data?.detail?.message || data?.detail || JSON.stringify(data);
-      throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
-    }
-    cdeNativeSaveTemplate(data);
-    cdeNativeSetMsg("Đã học mẫu Object Link native. Có thể bật Tự gắn khi click.", "ok");
-  } catch (err) {
-    cdeNativeSetMsg(`Không học được mẫu: ${err.message || err}`, "error");
+  if (elementCode) {
+    setMessage("selectionMessage", `Đã chọn cấu kiện ${elementCode}.`, "ok");
+  } else {
+    setMessage("selectionMessage", "Đã chọn cấu kiện nhưng chưa đọc được Mã hiệu.", "warn");
   }
 }
 
-async function cdeNativeCreateForCurrentSelection(silent = false) {
-  if (cdeNativeBusy) return;
-  if (!cdeNativeTemplate || !cdeNativeSample) {
-    if (!silent) cdeNativeSetMsg("Chưa có mẫu Object Link.", "warn");
+/* ---------------- Local linking ---------------- */
+
+function renderQuickMatches() {
+  const box = $("quickMatches");
+  if (!currentSelection?.elementCode) {
+    box.className = "empty-state";
+    box.innerHTML = "Chưa có cấu kiện hoặc Mã hiệu.";
     return;
   }
 
-  const backendUrl = getBackendProxyUrl();
-  const token = accessToken || await requestAccessToken();
-  const doc = cdeNativeDocForCurrentSelection();
-  if (!backendUrl || !token || !currentProject?.id) return;
-  if (!currentSelection?.ifcGuid || !currentSelection?.modelId) return;
-  if (!doc?.id) {
-    if (!silent) cdeNativeSetMsg(`Không có PDF khớp ${currentSelection?.elementCode || "Mã hiệu"}.`, "warn");
+  const docs = matchDocsByCode(currentSelection.elementCode);
+  if (!docs.length) {
+    box.className = "empty-state";
+    box.innerHTML = `Không tìm thấy PDF trùng mã <b>${escapeHtml(currentSelection.elementCode)}</b>.`;
     return;
   }
 
-  if (
-    currentSelection.ifcGuid === cdeNativeSample.sample_object_id &&
-    String(doc.id) === String(cdeNativeSample.sample_file_id)
-  ) {
-    if (!silent) cdeNativeSetMsg("Đây là liên kết mẫu đã có sẵn.", "ok");
-    return;
-  }
-
-  cdeNativeBusy = true;
-  if (!silent) cdeNativeSetMsg(`Đang tạo Object Link: ${currentSelection.elementCode} ↔ ${doc.name}...`, "warn");
-
-  try {
-    const res = await fetch(`${backendUrl}/api/trimble/objectlinks/create-from-template`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        project_id: currentProject.id,
-        token,
-        core_api_base: getCoreApiBase(),
-        template_link: cdeNativeTemplate,
-
-        sample_object_id: cdeNativeSample.sample_object_id,
-        sample_model_id: cdeNativeSample.sample_model_id,
-        sample_file_id: cdeNativeSample.sample_file_id,
-        sample_file_version_id: cdeNativeSample.sample_file_version_id,
-
-        object_id: currentSelection.ifcGuid,
-        model_id: currentSelection.modelId,
-        file_id: String(doc.id),
-        file_version_id: cdeNativeFileVersionId(doc),
-        element_code: currentSelection.elementCode,
-        file_name: doc.name,
-        dry_run: false,
-      }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      const detail = data?.detail?.message || data?.detail || JSON.stringify(data);
-      throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
-    }
-
-    cdeNativeSetMsg(
-      data.status === "already_exists"
-        ? `Đã có Object Link native: ${currentSelection.elementCode} ↔ ${doc.name}`
-        : `Đã tạo Object Link native: ${currentSelection.elementCode} ↔ ${doc.name}`,
-      "ok"
-    );
-  } catch (err) {
-    cdeNativeSetMsg(`Tạo Object Link thất bại: ${err.message || err}`, "error");
-  } finally {
-    cdeNativeBusy = false;
-  }
-}
-
-function cdeNativeMaybeAutoLink() {
-  if (localStorage.getItem("CDE_NATIVE_AUTO_LINK") !== "1") return;
-  if (!cdeNativeTemplate) return;
-  setTimeout(() => cdeNativeCreateForCurrentSelection(true), 250);
-}
-
-function cdeNativeInjectUi() {
-  if (document.getElementById("cdeNativePanel")) return;
-  const tabs = document.querySelector(".tabs");
-  if (tabs) {
-    const btn = document.createElement("button");
-    btn.className = "tab-button";
-    btn.dataset.tab = "native";
-    btn.type = "button";
-    btn.textContent = "Liên kết native";
-    tabs.appendChild(btn);
-    btn.addEventListener("click", () => setActiveTab("native"));
-  }
-
-  const main = document.querySelector(".app");
-  if (!main) return;
-  const section = document.createElement("section");
-  section.id = "tab-native";
-  section.className = "tab-panel";
-  section.innerHTML = `
-    <section id="cdeNativePanel" class="card">
-      <h2>Object Link native trong Trimble</h2>
-      <p class="hint">
-        Tạo thủ công 1 liên kết mẫu giữa một cấu kiện và đúng PDF.
-        Tool sẽ học cấu trúc liên kết đó rồi dùng lại cho các cấu kiện khác.
-      </p>
-      <div class="native-steps">
-        <div><b>1.</b> Quét PDF trong tab Nguồn PDF.</div>
-        <div><b>2.</b> Tạo thủ công 1 Object Link/Attachment mẫu trong Trimble.</div>
-        <div><b>3.</b> Chọn lại cấu kiện mẫu và bấm <b>Học mẫu</b>.</div>
-        <div><b>4.</b> Bật <b>Tự gắn khi click</b>.</div>
+  box.className = "file-list";
+  box.innerHTML = docs.map(doc => `
+    <div class="file-item">
+      <div>
+        <div class="file-name">${escapeHtml(doc.name)}</div>
+        <span class="match-tag">Khớp ${escapeHtml(currentSelection.elementCode)}</span>
       </div>
-      <dl class="info-grid compact">
-        <dt>Mẫu</dt>
-        <dd id="cdeNativeTemplateStatus">Chưa học mẫu</dd>
-      </dl>
-      <div class="row wrap">
-        <button id="cdeNativeLearnBtn" type="button">Học mẫu</button>
-        <button id="cdeNativeCreateBtn" class="secondary" type="button">Gắn native cấu kiện hiện tại</button>
+      <div class="file-actions">
+        <button class="icon-btn open" type="button" onclick="openLibraryDoc('${doc.id}')">Mở</button>
       </div>
-      <label class="native-check">
-        <input id="cdeNativeAuto" type="checkbox" />
-        Tự gắn Object Link khi click cấu kiện có PDF khớp
-      </label>
-      <p id="cdeNativeMessage" class="message"></p>
-    </section>
-  `;
-  main.appendChild(section);
+    </div>
+  `).join("");
+}
 
-  const style = document.createElement("style");
-  style.textContent = `
-    .native-steps {
-      display:grid; gap:6px; padding:10px; border:1px solid var(--border);
-      border-radius:10px; background:#f8fafc; font-size:12px; line-height:1.45;
-    }
-    .native-check {
-      display:flex; align-items:center; gap:8px; margin-top:12px; font-weight:700;
-    }
-    .native-check input { width:auto; }
-  `;
-  document.head.appendChild(style);
+async function findAndLinkCurrent() {
+  if (!currentSelection?.elementCode) {
+    setMessage("selectionMessage", "Hãy chọn cấu kiện có Mã hiệu trước.", "warn");
+    return;
+  }
+  if (!libraryDocs.length) {
+    setMessage("selectionMessage", "Thư viện chưa có PDF. Hãy thêm hồ sơ trước.", "warn");
+    setActiveTab("library");
+    return;
+  }
 
-  document.getElementById("cdeNativeLearnBtn")?.addEventListener("click", cdeNativeLearnTemplate);
-  document.getElementById("cdeNativeCreateBtn")?.addEventListener("click", () => cdeNativeCreateForCurrentSelection(false));
-  document.getElementById("cdeNativeAuto")?.addEventListener("change", (ev) => {
-    localStorage.setItem("CDE_NATIVE_AUTO_LINK", ev.target.checked ? "1" : "0");
+  const matches = matchDocsByCode(currentSelection.elementCode);
+  if (!matches.length) {
+    setMessage("selectionMessage", `Không tìm thấy PDF trùng mã ${currentSelection.elementCode}.`, "warn");
+    return;
+  }
+
+  const objectKey = currentObjectKey();
+  const record = {
+    objectKey,
+    projectId: currentProject?.id || null,
+    modelId: currentSelection.modelId,
+    runtimeId: currentSelection.runtimeId,
+    ifcGuid: currentSelection.ifcGuid,
+    elementCode: currentSelection.elementCode,
+    elementName: currentSelection.elementName,
+    docIds: matches.map(d => d.id),
+    updatedAt: new Date().toISOString(),
+  };
+  await dbPut(LINK_STORE, record);
+  await loadCurrentLinks();
+  setMessage(
+    "selectionMessage",
+    `Đã gắn ${matches.length} hồ sơ với ${currentSelection.elementCode}.`,
+    "ok"
+  );
+  setActiveTab("links");
+}
+
+async function loadCurrentLinks() {
+  const list = $("linkedList");
+  currentLinkedDocs = [];
+
+  const key = currentObjectKey();
+  if (!key) {
+    $("summaryLinked").textContent = "0";
+    list.innerHTML = `<div class="empty-state">Chưa có cấu kiện được chọn.</div>`;
+    setMessage("linksMessage", "", "");
+    return;
+  }
+
+  const record = await dbGet(LINK_STORE, key);
+  if (!record?.docIds?.length) {
+    $("summaryLinked").textContent = "0";
+    list.innerHTML = `<div class="empty-state">Cấu kiện này chưa được gắn hồ sơ.</div>`;
+    setMessage("linksMessage", "Bạn có thể bấm “Tìm hồ sơ trùng Mã hiệu và gắn”.", "warn");
+    return;
+  }
+
+  const docs = [];
+  for (const id of record.docIds) {
+    const doc = await dbGet(DOC_STORE, id);
+    if (doc) docs.push(doc);
+  }
+  currentLinkedDocs = docs;
+  $("summaryLinked").textContent = String(docs.length);
+
+  if (!docs.length) {
+    list.innerHTML = `<div class="empty-state">Liên kết có tồn tại nhưng file PDF đã bị xóa khỏi thư viện.</div>`;
+    return;
+  }
+
+  list.innerHTML = docs.map(doc => `
+    <div class="file-item">
+      <div>
+        <div class="file-name">${escapeHtml(doc.name)}</div>
+        <div class="file-meta">Đã gắn với ${escapeHtml(record.elementCode || "-")}</div>
+      </div>
+      <div class="file-actions">
+        <button class="icon-btn open" type="button" onclick="openLibraryDoc('${doc.id}')">Mở PDF</button>
+      </div>
+    </div>
+  `).join("");
+
+  setMessage("linksMessage", `Đã gắn ${docs.length} hồ sơ với cấu kiện này.`, "ok");
+}
+async function unlinkCurrent() {
+  const key = currentObjectKey();
+  if (!key) return;
+  await dbDelete(LINK_STORE, key);
+  await loadCurrentLinks();
+  setMessage("linksMessage", "Đã bỏ liên kết hồ sơ của cấu kiện hiện tại.", "ok");
+}
+
+/* ---------------- Drag/drop + startup ---------------- */
+
+function setupPickers() {
+  $("pickFilesBtn").addEventListener("click", () => $("filePicker").click());
+  $("pickFolderBtn").addEventListener("click", () => $("folderPicker").click());
+
+  $("filePicker").addEventListener("change", async e => {
+    await importFiles(e.target.files);
+    e.target.value = "";
   });
-  cdeNativeLoadTemplate();
+  $("folderPicker").addEventListener("change", async e => {
+    await importFiles(e.target.files);
+    e.target.value = "";
+  });
+
+  const zone = $("dropZone");
+  ["dragenter", "dragover"].forEach(name => {
+    zone.addEventListener(name, e => {
+      e.preventDefault();
+      zone.classList.add("dragover");
+    });
+  });
+  ["dragleave", "drop"].forEach(name => {
+    zone.addEventListener(name, e => {
+      e.preventDefault();
+      zone.classList.remove("dragover");
+    });
+  });
+  zone.addEventListener("drop", async e => {
+    await importFiles(e.dataTransfer.files);
+  });
 }
 
-const _cdeOriginalHandleSelectionChanged = handleSelectionChanged;
-handleSelectionChanged = async function(arg) {
-  await _cdeOriginalHandleSelectionChanged(arg);
-  cdeNativeMaybeAutoLink();
-};
+window.openLibraryDoc = openLibraryDoc;
+window.removeLibraryDoc = removeLibraryDoc;
 
-window.addEventListener("DOMContentLoaded", () => {
-  cdeNativeInjectUi();
+window.addEventListener("DOMContentLoaded", async () => {
+  initTabs();
+  setupPickers();
+
+  $("librarySearch").addEventListener("input", renderLibrary);
+  $("clearLibraryBtn").addEventListener("click", clearLibrary);
+  $("findAndLinkBtn").addEventListener("click", findAndLinkCurrent);
+  $("unlinkCurrentBtn").addEventListener("click", unlinkCurrent);
+
+  await refreshLibrary();
+  await initTrimble();
 });

@@ -1,7 +1,9 @@
 {
   "url": "https://handsome292004-lgtm.github.io/cde-bim-tool-v1/extension/index.html",
-  "title": "CDE BIM PDF Linker",
+  "title": "CDE BIM Hồ sơ Nghiệm thu",
   "icon": "https://handsome292004-lgtm.github.io/cde-bim-tool-v1/extension/icon.svg",
-  "description": "Link PDF documents to selected IFC/BIM objects in Trimble Connect 3D Viewer.",
-  "extensionType": ["3dviewer"]
+  "description": "Quản lý hồ sơ nghiệm thu PDF và liên kết theo Mã hiệu với cấu kiện IFC/BIM trong Trimble Connect.",
+  "extensionType": [
+    "3dviewer"
+  ]
 }

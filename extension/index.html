@@ -3,107 +3,118 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>CDE BIM PDF Linker</title>
+  <title>CDE BIM Hồ sơ Nghiệm thu</title>
   <link rel="stylesheet" href="style.css" />
   <script src="https://components.connect.trimble.com/trimble-connect-workspace-api/index.js"></script>
 </head>
 <body>
   <main class="app">
-    <header class="header">
+    <header class="topbar">
       <div>
-        <h1>CDE BIM PDF Linker</h1>
-        <p>Nguồn PDF: Trimble Connect Project</p>
+        <h1>CDE BIM Hồ sơ Nghiệm thu</h1>
+        <p>Chọn cấu kiện → tìm hồ sơ theo Mã hiệu → gắn vào cấu kiện trong tool</p>
       </div>
-      <span id="apiStatus" class="badge badge-gray">Chưa kết nối</span>
+      <span id="apiStatus" class="badge badge-gray">Đang kết nối...</span>
     </header>
 
-    <nav class="tabs" aria-label="Tool tabs">
+    <section class="summary">
+      <div class="stat">
+        <span class="stat-label">Mã hiệu đang chọn</span>
+        <strong id="summaryCode">-</strong>
+      </div>
+      <div class="stat">
+        <span class="stat-label">Hồ sơ trong thư viện</span>
+        <strong id="summaryDocs">0</strong>
+      </div>
+      <div class="stat">
+        <span class="stat-label">Hồ sơ đã gắn</span>
+        <strong id="summaryLinked">0</strong>
+      </div>
+    </section>
+
+    <nav class="tabs" aria-label="Dashboard tabs">
       <button class="tab-button active" data-tab="object" type="button">Cấu kiện</button>
-      <button class="tab-button" data-tab="docs" type="button">Hồ sơ PDF</button>
-      <button class="tab-button" data-tab="source" type="button">Nguồn PDF</button>
-      <button class="tab-button" data-tab="test" type="button">Test</button>
+      <button class="tab-button" data-tab="library" type="button">Hồ sơ nghiệm thu</button>
+      <button class="tab-button" data-tab="links" type="button">Liên kết</button>
     </nav>
 
     <section id="tab-object" class="tab-panel active">
       <section class="card">
-        <h2>Đối tượng đang chọn</h2>
-        <dl class="info-grid">
-          <dt>Project</dt>
-          <dd id="projectInfo">-</dd>
-          <dt>Model ID</dt>
-          <dd id="modelId">-</dd>
-          <dt>Runtime ID</dt>
-          <dd id="runtimeId">-</dd>
-          <dt>IFC GlobalId</dt>
-          <dd id="ifcGuid">-</dd>
-          <dt>Mã hiệu</dt>
-          <dd id="elementCode">-</dd>
-          <dt>Tên cấu kiện</dt>
-          <dd id="elementName">-</dd>
-        </dl>
-        <p id="selectionMessage" class="message">Hãy click một cấu kiện trong mô hình 3D.</p>
-      </section>
-    </section>
-
-    <section id="tab-docs" class="tab-panel">
-      <section class="card">
-        <div class="section-header">
-          <h2>Hồ sơ PDF khớp Mã hiệu</h2>
-          <button id="refreshMatchBtn" class="secondary" type="button">Tải lại</button>
-        </div>
-        <div id="documentsList" class="documents empty">Chưa có cấu kiện được chọn.</div>
-        <p id="documentsMessage" class="message"></p>
-      </section>
-    </section>
-
-    <section id="tab-source" class="tab-panel">
-      <section class="card">
-        <h2>Nguồn PDF từ Trimble Project</h2>
-        <p class="hint">Tool sẽ quét các file PDF trong project Trimble, sau đó tự match theo Mã hiệu trong tên file.</p>
-
-        <label for="backendProxyUrl">Backend Proxy URL</label>
-        <input id="backendProxyUrl" type="text" placeholder="https://...trycloudflare.com" />
-        <p class="hint">Dùng Cloudflare URL đang chạy backend local. Extension sẽ gọi backend này để quét file Trimble, tránh lỗi CORS.</p>
-
-        <label for="coreApiBase">Trimble Core API Base</label>
-        <input id="coreApiBase" type="text" value="https://app.connect.trimble.com/tc/api/2.0" />
-
-        <label for="folderFilter">Lọc theo thư mục/tên folder chứa PDF</label>
-        <input id="folderFilter" type="text" value="" placeholder="VD: 00_Bao Cao Nghiem Thu Khao Sat" />
-        <p class="hint">Có thể để trống để quét toàn bộ project.</p>
-
-        <label for="folderIdInput">Folder ID tùy chọn</label>
-        <input id="folderIdInput" type="text" value="" placeholder="Dán Folder ID nếu có, để trống nếu không biết" />
-        <p class="hint">Chỉ dùng khi API tự tìm folder chưa được. Có thể lấy Folder ID từ URL Explorer khi mở đúng thư mục PDF.</p>
-
-        <div class="row wrap">
-          <button id="saveBackendProxyBtn" class="secondary" type="button">Lưu Backend</button>
-          <button id="testBackendProxyBtn" class="secondary" type="button">Test Backend</button>
-          <button id="requestTokenBtn" type="button">Xin quyền Access Token</button>
-          <button id="scanTrimblePdfBtn" type="button">Quét PDF trong Trimble</button>
-          <button id="clearPdfCacheBtn" class="secondary" type="button">Xóa cache PDF</button>
+        <div class="card-title-row">
+          <div>
+            <h2>Cấu kiện đang chọn</h2>
+            <p class="hint">Click trực tiếp một cấu kiện trong mô hình Trimble.</p>
+          </div>
         </div>
 
-        <dl class="info-grid compact">
-          <dt>Token</dt>
-          <dd id="tokenStatus">-</dd>
-          <dt>Số PDF đã quét</dt>
-          <dd id="pdfCount">0</dd>
-          <dt>Lần quét</dt>
-          <dd id="lastScanInfo">-</dd>
-        </dl>
-        <p id="sourceMessage" class="message"></p>
+        <div class="object-box">
+          <div class="object-primary">
+            <span>Mã hiệu</span>
+            <strong id="elementCode">-</strong>
+          </div>
+          <div class="object-secondary">
+            <div><span>Tên cấu kiện</span><b id="elementName">-</b></div>
+            <div><span>IFC GlobalId</span><b id="ifcGuid">-</b></div>
+          </div>
+        </div>
+
+        <button id="findAndLinkBtn" class="primary full" type="button">
+          Tìm hồ sơ trùng Mã hiệu và gắn
+        </button>
+        <p id="selectionMessage" class="message">Hãy click một cấu kiện trong mô hình.</p>
+      </section>
+
+      <section class="card">
+        <h2>Hồ sơ phù hợp</h2>
+        <div id="quickMatches" class="empty-state">
+          Chưa có cấu kiện được chọn.
+        </div>
       </section>
     </section>
 
-    <section id="tab-test" class="tab-panel">
-      <section class="card muted">
-        <h2>Test ngoài Trimble</h2>
-        <p>Khi mở ngoài Trimble, bạn có thể nhập tay Mã hiệu để kiểm tra cache PDF đã quét.</p>
-        <label for="manualElementCode">Mã hiệu</label>
-        <input id="manualElementCode" type="text" placeholder="N5_GT_KCAD_L1_A01" />
-        <button id="manualSelectBtn" type="button" class="secondary">Dùng mã hiệu test</button>
-        <p id="testMessage" class="message"></p>
+    <section id="tab-library" class="tab-panel">
+      <section class="card">
+        <div class="card-title-row">
+          <div>
+            <h2>Thư viện hồ sơ nghiệm thu</h2>
+            <p class="hint">Thêm PDF trực tiếp vào dashboard. Không cần thư mục data/pdf và không cần Cloudflare.</p>
+          </div>
+        </div>
+
+        <div id="dropZone" class="drop-zone">
+          <div class="drop-icon">PDF</div>
+          <strong>Thả file PDF vào đây</strong>
+          <span>hoặc chọn file / chọn cả thư mục</span>
+          <div class="row center">
+            <button id="pickFilesBtn" class="primary" type="button">Thêm PDF</button>
+            <button id="pickFolderBtn" class="secondary" type="button">Thêm thư mục</button>
+          </div>
+          <input id="filePicker" type="file" accept=".pdf,application/pdf" multiple hidden />
+          <input id="folderPicker" type="file" accept=".pdf,application/pdf" multiple webkitdirectory directory hidden />
+        </div>
+
+        <div class="toolbar">
+          <input id="librarySearch" type="search" placeholder="Tìm theo tên file hoặc mã hiệu..." />
+          <button id="clearLibraryBtn" class="danger-ghost" type="button">Xóa tất cả</button>
+        </div>
+
+        <div id="libraryList" class="file-list"></div>
+        <p id="libraryMessage" class="message"></p>
+      </section>
+    </section>
+
+    <section id="tab-links" class="tab-panel">
+      <section class="card">
+        <div class="card-title-row">
+          <div>
+            <h2>Hồ sơ đã gắn với cấu kiện</h2>
+            <p class="hint">Liên kết được lưu trong trình duyệt trên máy đang dùng.</p>
+          </div>
+          <button id="unlinkCurrentBtn" class="danger-ghost" type="button">Bỏ liên kết</button>
+        </div>
+
+        <div id="linkedList" class="file-list"></div>
+        <p id="linksMessage" class="message"></p>
       </section>
     </section>
   </main>
